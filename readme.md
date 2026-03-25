@@ -116,6 +116,24 @@ Open the project root in IntelliJ. The Ghidra classpath will be resolved automat
 
 ---
 
+## 6. Running Tests
+
+```bash
+./gradlew test
+```
+
+Some tests require an actual binary to analyze and are skipped by default. To run them, pass the binary path via environment variable:
+
+```bash
+PATH_TO_BINARY_WITH_BLOCKS=/path/to/your-macho ./gradlew test
+```
+
+Or set it permanently in IntelliJ via `Run > Edit Configurations > Environment Variables`.
+
+Tests that depend on external binaries use JUnit's `assumeTrue` — if the required environment variable is not set, the test is **skipped** (shown as ignored), not failed. This is expected behavior.
+
+---
+
 ## Troubleshooting
 
 **`GHIDRA_INSTALL_DIR` not found during build**
