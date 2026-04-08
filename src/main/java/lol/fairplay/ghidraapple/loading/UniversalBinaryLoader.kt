@@ -35,7 +35,7 @@ class UniversalBinaryLoader : MachoLoader() {
 
             // If the preferred name is the same as the give name, this probably wasn't
             // part of a universal binary. Thus, we skip any operations.
-            if (program.name == preferredName) return
+            if (program.name == preferredName) continue
 
             // Otherwise, we rename with the preferred name.
             program.withTransaction<Exception>("rename") {

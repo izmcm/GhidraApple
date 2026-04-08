@@ -48,7 +48,8 @@ class StringLiteralXRefAnalyzer : AbstractAnalyzer(NAME, DESCRIPTION, AnalyzerTy
         setPrototype()
     }
 
-    override fun canAnalyze(program: Program): Boolean = true
+    override fun canAnalyze(program: Program): Boolean = program.language.processor ==
+            ghidra.program.model.lang.Processor.findOrPossiblyCreateProcessor("AARCH64")
 
     override fun added(
         program: Program,
@@ -74,10 +75,11 @@ class StringLiteralXRefAnalyzer : AbstractAnalyzer(NAME, DESCRIPTION, AnalyzerTy
                 val adrpDestReg = inst.getRegister(0) ?: continue
                 val pageBase = getAdrpBase(inst, program) ?: continue
 
-                // Look for add immediately after that writes to the same register
+                // Look for add immediately after that reads and writes in the same register
                 val addInst = findNextInstruction(listing, inst, MAX_FORWARD_STEPS) {
                     it.mnemonicString == "add" &&
-                            it.getRegister(0)?.name == adrpDestReg.name
+                            it.getRegister(0)?.name == adrpDestReg.name &&
+                            it.getRegister(1)?.name == adrpDestReg.name
                 } ?: continue
 
                 val addOffset = addInst.getScalar(2)?.unsignedValue ?: continue
@@ -103,13 +105,15 @@ class StringLiteralXRefAnalyzer : AbstractAnalyzer(NAME, DESCRIPTION, AnalyzerTy
                 val stringValue = readStringAt(program, stringAddr2) ?: continue
 
                 runCatching {
-                    refMgr.addMemoryReference(
-                        anchorInst.address,
-                        stringAddr2,
-                        RefType.DATA,
-                        SourceType.ANALYSIS,
-                        0,
-                    )
+                    if (refMgr.getReference(anchorInst.address, stringAddr2, 0) == null) {
+                        refMgr.addMemoryReference(
+                            anchorInst.address,
+                            stringAddr2,
+                            RefType.DATA,
+                            SourceType.ANALYSIS,
+                            0,
+                        )
+                    }
                 }.onFailure {
                     Msg.warn(this, "Could not add xref at ${anchorInst.address}: ${it.message}")
                 }
@@ -119,7 +123,12 @@ class StringLiteralXRefAnalyzer : AbstractAnalyzer(NAME, DESCRIPTION, AnalyzerTy
                     val comment = "\"$stringValue\""
                     val existing = codeUnit.getComment(CommentType.EOL)
                     if (existing == null || !existing.contains(comment)) {
-                        codeUnit.setComment(CommentType.EOL, comment)
+                        val mergedComment = if (existing.isNullOrBlank()) {
+                            comment
+                        } else {
+                            "$existing | $comment"
+                        }
+                        codeUnit.setComment(CommentType.EOL, mergedComment)
                     }
                 }.onFailure {
                     Msg.warn(this, "Could not set comment at ${anchorInst.address}: ${it.message}")
