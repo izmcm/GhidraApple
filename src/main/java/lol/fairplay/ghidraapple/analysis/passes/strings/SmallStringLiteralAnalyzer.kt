@@ -93,6 +93,7 @@ class SmallStringLiteralAnalyzer : AbstractAnalyzer(
     ): Boolean {
         val listing = program.listing
         var count = 0
+        val processedAddresses = mutableSetOf<ghidra.program.model.address.Address>()
 
         try {
             val instructions = listing.getInstructions(set, true)
@@ -101,6 +102,9 @@ class SmallStringLiteralAnalyzer : AbstractAnalyzer(
                 if (monitor.isCancelled) throw CancelledException()
 
                 val inst = instructions.next() ?: continue
+
+                // Skip if this instruction was already processed as part of a previous sequence
+                if (inst.address in processedAddresses) continue
 
                 // Look for mov or movz instructions with immediate values
                 val isMov = inst.mnemonicString == "mov" || inst.mnemonicString == "movz"
@@ -133,7 +137,8 @@ class SmallStringLiteralAnalyzer : AbstractAnalyzer(
                     destReg.name,
                     0, // byte offset 0 for first register
                     accumulatedBytes,
-                    addressStr
+                    addressStr,
+                    processedAddresses
                 )
                 debugPrintln(addressStr, "[SmallStringAnalyzer] <<< Exiting collectMovksForRegister, accumulatedBytes now: ${accumulatedBytes.joinToString(" ") { "%02x".format(it) }}")
 
@@ -144,7 +149,8 @@ class SmallStringLiteralAnalyzer : AbstractAnalyzer(
                     listing,
                     lastFirstRegInst,
                     accumulatedBytes,
-                    addressStr
+                    addressStr,
+                    processedAddresses
                 ) ?: lastFirstRegInst
                 debugPrintln(addressStr, "[SmallStringAnalyzer] <<< Exiting collectSecondRegisterIfPresent, accumulatedBytes now: ${accumulatedBytes.joinToString(" ") { "%02x".format(it) }}")
                 val stringBytes = accumulatedBytes.toByteArray()
@@ -184,6 +190,16 @@ class SmallStringLiteralAnalyzer : AbstractAnalyzer(
                 }
 
                 debugPrintln(addressStr, "[SmallStringAnalyzer] ✓ SUCCESS at ${inst.address}: \"$stringValue\"")
+
+                // Mark all instructions in this sequence as processed
+                processedAddresses.add(inst.address)
+                var temp = inst
+                while (true) {
+                    val next = listing.getInstructionAfter(temp.address) ?: break
+                    if (next.address > discriminatorInst.address) break
+                    processedAddresses.add(next.address)
+                    temp = next
+                }
 
                 // Add a reference and comment at the discriminator instruction
                 if (stringValue.isNotEmpty()) {
@@ -231,7 +247,8 @@ class SmallStringLiteralAnalyzer : AbstractAnalyzer(
         regName: String,
         byteOffset: Int,
         accumulatedBytes: MutableList<Byte>,
-        addressStr: String
+        addressStr: String,
+        processedAddresses: MutableSet<ghidra.program.model.address.Address>
     ): Instruction {
         var current = startInst
         var movkCount = 0
@@ -273,6 +290,7 @@ class SmallStringLiteralAnalyzer : AbstractAnalyzer(
 
             current = nextMovk
             movkCount++
+            processedAddresses.add(nextMovk.address)
         }
 
         debugPrintln(addressStr, "[SmallStringAnalyzer] collectMovksForRegister finished: processed $movkCount movks")
@@ -295,7 +313,8 @@ class SmallStringLiteralAnalyzer : AbstractAnalyzer(
         listing: Listing,
         lastFirstRegInst: Instruction,
         accumulatedBytes: MutableList<Byte>,
-        addressStr: String
+        addressStr: String,
+        processedAddresses: MutableSet<ghidra.program.model.address.Address>
     ): Instruction? {
         // Next instruction should be either second register mov, discriminator, or something else
         val next = listing.getInstructionAfter(lastFirstRegInst.address) ?: return null
@@ -353,7 +372,8 @@ class SmallStringLiteralAnalyzer : AbstractAnalyzer(
             secondRegName,
             8, // byte offset for second register
             accumulatedBytes,
-            addressStr
+            addressStr,
+            processedAddresses
         )
     }
 
