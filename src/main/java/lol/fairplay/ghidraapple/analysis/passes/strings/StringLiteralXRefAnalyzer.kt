@@ -73,7 +73,7 @@ class StringLiteralXRefAnalyzer : AbstractAnalyzer(NAME, DESCRIPTION, AnalyzerTy
                 if (inst.mnemonicString != "adrp") continue
 
                 val adrpDestReg = inst.getRegister(0) ?: continue
-                val pageBase = getAdrpBase(inst, program) ?: continue
+                val pageBase = getAdrpBase(inst) ?: continue
 
                 // Look for add immediately after that reads and writes in the same register
                 val addInst = findNextInstruction(listing, inst, MAX_FORWARD_STEPS) {
@@ -94,10 +94,10 @@ class StringLiteralXRefAnalyzer : AbstractAnalyzer(NAME, DESCRIPTION, AnalyzerTy
                 // The anchor instruction to annotate and the final address
                 val (anchorInst, stringAddr) = if (subInst != null) {
                     // sub is a Swift ABI artifact — discard its offset, use add address
-                    subInst to tryAddress(program, pageBase, addOffset)
+                    subInst to tryAddress(pageBase, addOffset)
                 } else {
-                    addInst to tryAddress(program, pageBase, addOffset)
-                } ?: continue
+                    addInst to tryAddress(pageBase, addOffset)
+                }
 
                 val stringAddr2 = stringAddr ?: continue
 
@@ -157,12 +157,13 @@ class StringLiteralXRefAnalyzer : AbstractAnalyzer(NAME, DESCRIPTION, AnalyzerTy
         predicate: (Instruction) -> Boolean,
     ): Instruction? {
         var current = from
-        for (i in 0 until maxSteps) {
+        repeat(maxSteps) {
             current = listing.getInstructionAfter(current.address) ?: return null
-            // Stop at branches — we don't want to cross basic block boundaries
+
             val mnemonic = current.mnemonicString
             if (mnemonic == "bl" || mnemonic == "blr" || mnemonic == "b" ||
-                mnemonic == "br" || mnemonic.startsWith("b.")
+                mnemonic == "br" || mnemonic.startsWith("b.") || mnemonic == "ret" ||
+                mnemonic == "cbz" || mnemonic == "cbnz" || mnemonic == "tbz" || mnemonic == "tbnz"
             ) return null
             if (predicate(current)) return current
         }
@@ -173,7 +174,7 @@ class StringLiteralXRefAnalyzer : AbstractAnalyzer(NAME, DESCRIPTION, AnalyzerTy
      * Extracts the resolved page base address from an ADRP instruction.
      * Prefers already-resolved memory references, falls back to scalar.
      */
-    private fun getAdrpBase(adrpInst: Instruction, program: Program): Address? {
+    private fun getAdrpBase(adrpInst: Instruction): Address? {
         val refs = adrpInst.referencesFrom
         if (refs.isNotEmpty()) return refs.first().toAddress
         val scalar = adrpInst.getScalar(1) ?: return null
@@ -183,7 +184,7 @@ class StringLiteralXRefAnalyzer : AbstractAnalyzer(NAME, DESCRIPTION, AnalyzerTy
     /**
      * Safely computes pageBase + offset, returning null on overflow.
      */
-    private fun tryAddress(program: Program, pageBase: Address, offset: Long): Address? {
+    private fun tryAddress(pageBase: Address, offset: Long): Address? {
         return runCatching { pageBase.add(offset) }.getOrNull()
     }
 

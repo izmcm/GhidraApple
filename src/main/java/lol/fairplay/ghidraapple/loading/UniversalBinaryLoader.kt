@@ -33,7 +33,7 @@ class UniversalBinaryLoader : MachoLoader() {
             // This will trigger [getPreferredFileName] above.
             val preferredName = loaded.name
 
-            // If the preferred name is the same as the give name, this probably wasn't
+            // If the preferred name is the same as the given name, this probably wasn't
             // part of a universal binary. Thus, we skip any operations.
             if (program.name == preferredName) continue
 
