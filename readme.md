@@ -1,4 +1,25 @@
-# GhidraApple — Development Setup
+# GhidraApple
+
+Better binary analysis for Apple platforms.
+
+## Features
+
+- Objective-C
+    -  [x] Better encoding parsers
+    -  [x] Class modeling
+    -  [x] Enhanced method signature propagation
+        -  [x] Extended method signature types using MRO
+        -  [x] Automatic selector-based parameter renaming
+    -  [x] Automatic property tagging and annotation
+    -  [x] NSBlock Analysis
+- Swift
+    -  [x] Small string analysis
+    -  [x] String literal XREF analysis
+- Universal
+    -  [ ] Improved DYLD shared cache loader
+
+
+## Development Setup
 
 Complete guide to set up the GhidraApple extension development environment.
 
