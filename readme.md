@@ -6,6 +6,43 @@ Supported Ghidra versions: **12.1.3** and **12.1.2**.
 
 ---
 
+## macOS: build Ghidra's native binaries first
+
+**Do this once per Ghidra installation, before anything else.**
+
+Ghidra is almost entirely Java, but a few components are native executables compiled per platform —
+the decompiler among them. An official Ghidra release ships those prebuilt for Windows and Linux
+only; on macOS you build them yourself. From [Ghidra's own `GettingStarted.md`](https://github.com/NationalSecurityAgency/ghidra/blob/master/GhidraDocs/GettingStarted.md):
+
+> An official public Ghidra release includes native binaries for the following platforms:
+> Windows x86 64-bit, Windows ARM 64-bit, Linux x86 64-bit.
+> Ghidra supports running on the following additional platforms with **user-built native binaries**:
+> macOS x86 64-bit, macOS ARM 64-bit, [...]
+
+Without this step Ghidra still starts and disassembles fine, so it is easy to miss — but the
+Decompiler panel stays empty, and the GhidraApple analyzers that drive the decompiler
+(`OCTypeInjectorAnalyzer`, `SelectorTrampolineAnalyzer`, `MarkBlocks`, the MIG support) silently do
+less than they should. Four of the tests in this repo fail for the same reason.
+
+You need Xcode or the Command Line Tools (`xcode-select --install`). The Gradle wrapper ships with
+Ghidra, so there is nothing else to install:
+
+```bash
+cd /path/to/ghidra_12.1.3_PUBLIC/support/gradle
+./gradlew buildNatives
+```
+
+Takes well under a minute. Verify — `mac_arm_64` on Apple Silicon, `mac_x86_64` on Intel:
+
+```bash
+ls /path/to/ghidra_12.1.3_PUBLIC/Ghidra/Features/Decompiler/build/os/mac_arm_64/
+# should list: decompile  sleigh
+```
+
+> Redo this after upgrading Ghidra — a new installation has no native binaries either.
+
+---
+
 ## Installation (no build required)
 
 If you just want to use the extension, **don't clone or build anything** — grab the ready-made `.zip` from the [Releases page](https://github.com/izmcm/GhidraApple/releases) and install it.
@@ -137,6 +174,8 @@ Open the project root in IntelliJ. The Ghidra classpath will be resolved automat
 ./gradlew test
 ```
 
+On macOS this needs Ghidra's native binaries — see [the first section](#macos-build-ghidras-native-binaries-first).
+
 Some tests require an actual binary to analyze and are skipped by default. To run them, pass the binary path via environment variable:
 
 ```bash
@@ -172,6 +211,10 @@ Make sure the variable was exported in the current shell, not just assigned with
 
 **Analyzers not showing up in Ghidra**
 Check that the `GhidraApple` folder exists under `$GHIDRA_INSTALL_DIR/Ghidra/Extensions/` and that Ghidra was restarted after installation.
+
+**Decompiler panel is empty, or `Could not find decompiler executable` in the logs**
+Ghidra's native binaries were never built for macOS. See
+[macOS: build Ghidra's native binaries first](#macos-build-ghidras-native-binaries-first).
 
 **Java version error**
 Confirm with `java -version` that you're running Temurin 21. Other distributions (Oracle JDK, GraalVM) may cause incompatibilities.

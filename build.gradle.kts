@@ -62,6 +62,8 @@ kotlin {
 tasks.test {
     useJUnitPlatform()
     maxParallelForks = Runtime.getRuntime().availableProcessors().div(2)
+    forkEvery = 1
+    systemProperty("jdk.serialFilterFactory", "ghidra.framework.remote.GhidraSerialFilterFactory")
 }
 
 sourceSets {
