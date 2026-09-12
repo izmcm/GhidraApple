@@ -48,7 +48,8 @@ class StringLiteralXRefAnalyzer : AbstractAnalyzer(NAME, DESCRIPTION, AnalyzerTy
         setPrototype()
     }
 
-    override fun canAnalyze(program: Program): Boolean = program.language.processor ==
+    override fun canAnalyze(program: Program): Boolean =
+        program.language.processor ==
             ghidra.program.model.lang.Processor.findOrPossiblyCreateProcessor("AARCH64")
 
     override fun added(
@@ -76,28 +77,31 @@ class StringLiteralXRefAnalyzer : AbstractAnalyzer(NAME, DESCRIPTION, AnalyzerTy
                 val pageBase = getAdrpBase(inst) ?: continue
 
                 // Look for add immediately after that reads and writes in the same register
-                val addInst = findNextInstruction(listing, inst, MAX_FORWARD_STEPS) {
-                    it.mnemonicString == "add" &&
+                val addInst =
+                    findNextInstruction(listing, inst, MAX_FORWARD_STEPS) {
+                        it.mnemonicString == "add" &&
                             it.getRegister(0)?.name == adrpDestReg.name &&
                             it.getRegister(1)?.name == adrpDestReg.name
-                } ?: continue
+                    } ?: continue
 
                 val addOffset = addInst.getScalar(2)?.unsignedValue ?: continue
 
                 // Check for optional sub after the add
-                val subInst = findNextInstruction(listing, addInst, MAX_FORWARD_STEPS) {
-                    it.mnemonicString == "sub" &&
+                val subInst =
+                    findNextInstruction(listing, addInst, MAX_FORWARD_STEPS) {
+                        it.mnemonicString == "sub" &&
                             it.getRegister(1)?.name == adrpDestReg.name &&
                             it.getScalar(2) != null // immediate only
-                }
+                    }
 
                 // The anchor instruction to annotate and the final address
-                val (anchorInst, stringAddr) = if (subInst != null) {
-                    // sub is a Swift ABI artifact — discard its offset, use add address
-                    subInst to tryAddress(pageBase, addOffset)
-                } else {
-                    addInst to tryAddress(pageBase, addOffset)
-                }
+                val (anchorInst, stringAddr) =
+                    if (subInst != null) {
+                        // sub is a Swift ABI artifact — discard its offset, use add address
+                        subInst to tryAddress(pageBase, addOffset)
+                    } else {
+                        addInst to tryAddress(pageBase, addOffset)
+                    }
 
                 val stringAddr2 = stringAddr ?: continue
 
@@ -123,11 +127,12 @@ class StringLiteralXRefAnalyzer : AbstractAnalyzer(NAME, DESCRIPTION, AnalyzerTy
                     val comment = "\"$stringValue\""
                     val existing = codeUnit.getComment(CommentType.EOL)
                     if (existing == null || !existing.contains(comment)) {
-                        val mergedComment = if (existing.isNullOrBlank()) {
-                            comment
-                        } else {
-                            "$existing | $comment"
-                        }
+                        val mergedComment =
+                            if (existing.isNullOrBlank()) {
+                                comment
+                            } else {
+                                "$existing | $comment"
+                            }
                         codeUnit.setComment(CommentType.EOL, mergedComment)
                     }
                 }.onFailure {
@@ -164,7 +169,9 @@ class StringLiteralXRefAnalyzer : AbstractAnalyzer(NAME, DESCRIPTION, AnalyzerTy
             if (mnemonic == "bl" || mnemonic == "blr" || mnemonic == "b" ||
                 mnemonic == "br" || mnemonic.startsWith("b.") || mnemonic == "ret" ||
                 mnemonic == "cbz" || mnemonic == "cbnz" || mnemonic == "tbz" || mnemonic == "tbnz"
-            ) return null
+            ) {
+                return null
+            }
             if (predicate(current)) return current
         }
         return null
@@ -184,7 +191,10 @@ class StringLiteralXRefAnalyzer : AbstractAnalyzer(NAME, DESCRIPTION, AnalyzerTy
     /**
      * Safely computes pageBase + offset, returning null on overflow.
      */
-    private fun tryAddress(pageBase: Address, offset: Long): Address? {
+    private fun tryAddress(
+        pageBase: Address,
+        offset: Long,
+    ): Address? {
         return runCatching { pageBase.add(offset) }.getOrNull()
     }
 
@@ -192,7 +202,10 @@ class StringLiteralXRefAnalyzer : AbstractAnalyzer(NAME, DESCRIPTION, AnalyzerTy
      * Reads the string value at [addr] from the program listing.
      * Returns null if there is no string data there.
      */
-    private fun readStringAt(program: Program, addr: Address): String? {
+    private fun readStringAt(
+        program: Program,
+        addr: Address,
+    ): String? {
         return runCatching {
             val data = program.listing.getDataAt(addr) ?: return null
             val value = data.value

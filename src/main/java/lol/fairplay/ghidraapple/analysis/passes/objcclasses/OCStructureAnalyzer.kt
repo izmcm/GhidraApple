@@ -146,7 +146,12 @@ class OCStructureAnalyzer : AbstractAnalyzer(NAME, DESCRIPTION, AnalyzerType.BYT
                         null,
                     )
                 }.onFailure {
-                    Msg.warn(this, "Failed to create structure ${model.name}. Values ivar.name=${ivar.name}|ivar.type=${ivar.type}|fieldType=${fieldType}|dataType=${dataType}: ${it.message}")
+                    Msg.warn(
+                        this,
+                        "Failed to create structure ${model.name}. " +
+                            "Values ivar.name=${ivar.name}|ivar.type=${ivar.type}|" +
+                            "fieldType=$fieldType|dataType=$dataType: ${it.message}",
+                    )
                 }
             }
         }
