@@ -3,68 +3,145 @@ package lol.fairplay.ghidraapple.analysis.passes.strings
 import ghidra.app.services.AbstractAnalyzer
 import ghidra.app.services.AnalyzerType
 import ghidra.app.util.importer.MessageLog
+import ghidra.program.model.address.Address
 import ghidra.program.model.address.AddressSetView
+import ghidra.program.model.lang.OperandType
+import ghidra.program.model.lang.Register
 import ghidra.program.model.listing.CommentType
+import ghidra.program.model.listing.Function
 import ghidra.program.model.listing.Instruction
-import ghidra.program.model.listing.Listing
 import ghidra.program.model.listing.Program
+import ghidra.program.model.pcode.PcodeOp
+import ghidra.program.model.scalar.Scalar
+import ghidra.program.util.ContextEvaluatorAdapter
+import ghidra.program.util.SymbolicPropogator
 import ghidra.util.Msg
 import ghidra.util.exception.CancelledException
 import ghidra.util.task.TaskMonitor
 
 /**
- * Reconstructs small string literals encoded directly in ARM64 registers.
+ * Reconstructs small string literals that Swift encodes directly in registers.
  *
- * Small strings in Swift are stored inline within the 16-byte `_StringObject` structure,
- * using one or more 64-bit registers to hold the content and an additional register
- * for the discriminator.
+ * A Swift string of at most 15 ASCII bytes is stored inline in the 16 bytes of `_StringObject`
+ * rather than behind a pointer. The compiler therefore never emits the characters as data — they
+ * only ever exist as a pair of 64-bit immediates, which is why they are invisible to Ghidra's
+ * normal string search.
  *
- * ## Detected Patterns
+ * ## Layout
  *
- * ### Pattern 1: Short string (≤ 4 bytes)
  * ```
- * mov w8, #0x6948           ; "Hi" in little-endian
- * mov x9, #-0x1e00000000000000  ; discriminator with isSmall bit set
- * ```
- *
- * ### Pattern 2: Long small string (5-16 bytes)
- * ```
- * mov x0, #0x6548           ; "He" (bytes 0-1)
- * movk x0, #0x6c6c, lsl #16 ; "ll" (bytes 2-3)
- * movk x0, #0x2c6f, lsl #32 ; "o," (bytes 4-5)
- * movk x0, #0x5720, lsl #48 ; " W" (bytes 6-7)
- * mov x1, #0xef21...        ; remaining bytes + discriminator
+ * byte:  0 .......................... 14                    15
+ *       [ up to 15 content bytes, zero-padded ][ discriminator | count ]
  * ```
  *
- * ## Discriminator Bits
+ * Byte 15 packs the flags in its high nibble (bit 63 isImmortal, 62 isASCII, 61 isSmall,
+ * 60 isForeign) and the character count in its low nibble. `"Hi"` is `0x48 0x69 0*13 0xE2`.
  *
- * The discriminator value contains Swift string metadata:
- *   - bit 63: isImmortal (1 = string literal)
- *   - bit 62: isASCII (1 = all characters are ASCII-7)
- *   - bit 61: isSmall (1 = small string, content is inline)
- *   - bit 60: isForeign (0 = native, 1 = bridged)
+ * ## Why this does not pattern-match instructions
  *
- * For typical small string literals: discriminator has high bits = 0xe... (1110 binary)
+ * The two words are built completely differently per target, and neither shape is a fixed
+ * instruction sequence:
+ *
+ * ```
+ * ; arm64 — 16 bits of immediate at a time, then both words stored together
+ * mov  x8, #0x4946
+ * movk x8, #0x3065, lsl #16
+ * movk x8, #0x556d, lsl #32
+ * movk x8, #0x5848, lsl #48
+ * stp  x8, x23, [x0, #0x20]     ; x23 holds the discriminator, set once and reused
+ *
+ * ; x86-64 — one immediate fills a word, and the two halves are stored separately
+ * movabsq $0x5848556d30654946, %rax
+ * movq    %rax, 0x20(%r15)
+ * movq    %rbx, 0x28(%r15)      ; %rbx holds the discriminator, set once and reused
+ * ```
+ *
+ * The discriminator register is hoisted out of loops and kept alive across calls, so the
+ * instruction that defines it can be arbitrarily far away — or absent from the block entirely.
+ * Instead of matching mnemonics, this analyzer asks [SymbolicPropogator] for the constant value
+ * of each register at each instruction and reassembles the 16 bytes from the two words that end
+ * up adjacent, either in memory or in a consecutive ABI register pair.
  *
  * ## References
  *
- * - Swift String Implementation: https://github.com/apple/swift/blob/main/stdlib/public/core/String.swift
- * - StringObject Source: https://github.com/swiftlang/swift/blob/main/stdlib/public/core/StringObject.swift
- * - SmallString Source: https://github.com/swiftlang/swift/blob/main/stdlib/public/core/SmallString.swift
+ * - [StringObject](https://github.com/swiftlang/swift/blob/main/stdlib/public/core/StringObject.swift)
+ * - [SmallString](https://github.com/swiftlang/swift/blob/main/stdlib/public/core/SmallString.swift)
  */
 class SmallStringLiteralAnalyzer : AbstractAnalyzer(
     NAME,
     DESCRIPTION,
-    AnalyzerType.INSTRUCTION_ANALYZER
+    AnalyzerType.FUNCTION_ANALYZER,
 ) {
     companion object {
         private const val NAME = "Small String Literal Reconstruction"
         private const val DESCRIPTION =
-            "Reconstructs small string literals encoded in ARM64 mov/movk sequences"
+            "Reconstructs Swift small string literals held inline in register pairs (arm64 and x86-64)"
 
-        private const val MAX_MOVK_SEQUENCE = 3  // max movk instructions after initial mov
+        private const val WORD_SIZE = 8L
+        private const val STRING_OBJECT_SIZE = 16
+        private const val MAX_SMALL_STRING_LENGTH = 15
+
+        /** isSmall (bit 61) set and isForeign (bit 60) clear, both within byte 15. */
+        private const val DISCRIMINATOR_MASK = 0x30
+        private const val DISCRIMINATOR_SMALL = 0x20
+
         private const val PRINTABLE_ASCII_MIN = 0x20
         private const val PRINTABLE_ASCII_MAX = 0x7e
+
+        private val SUPPORTED_PROCESSORS = setOf("AARCH64", "x86")
+
+        /**
+         * Registers that can hold the two halves of a `String` passed to, or returned from, a
+         * call. A `String` occupies two consecutive slots, but it is not aligned to a slot pair:
+         * `print(_:separator:terminator:)` puts its separator in `x1`/`x2`, so every adjacent
+         * pair has to be considered, not just the even-aligned ones.
+         */
+        private val ARM64_ABI_REGISTERS = listOf("x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7")
+        private val X86_ABI_REGISTERS = listOf("RDI", "RSI", "RDX", "RCX", "R8", "R9")
+        private val X86_RETURN_REGISTERS = "RAX" to "RDX"
+
+        /**
+         * Rebuilds the string from the two words of a `_StringObject`, or returns null if they do
+         * not describe a small ASCII string.
+         *
+         * Every field is checked — the discriminator bits, the count, the zero padding after the
+         * content and the content bytes themselves. That strictness is what makes the analyzer
+         * usable: candidate word pairs are cheap to produce and mostly junk, so the decoder, not
+         * the search, is what has to reject them.
+         */
+        internal fun decodeSmallString(
+            lowWord: Long,
+            highWord: Long,
+        ): String? = decodeSmallString(wordsToBytes(lowWord, highWord))
+
+        internal fun decodeSmallString(bytes: ByteArray): String? {
+            if (bytes.size < STRING_OBJECT_SIZE) return null
+
+            val discriminator = bytes[15].toInt() and 0xff
+            if (discriminator and DISCRIMINATOR_MASK != DISCRIMINATOR_SMALL) return null
+
+            val count = discriminator and 0x0f
+            if (count == 0) return null
+            if ((count until MAX_SMALL_STRING_LENGTH).any { bytes[it] != 0.toByte() }) return null
+
+            val characters = CharArray(count)
+            for (index in 0 until count) {
+                val byte = bytes[index].toInt() and 0xff
+                val printable = byte in PRINTABLE_ASCII_MIN..PRINTABLE_ASCII_MAX || byte in 0x09..0x0d
+                if (!printable) return null
+                characters[index] = byte.toChar()
+            }
+            return String(characters)
+        }
+
+        private fun wordsToBytes(
+            lowWord: Long,
+            highWord: Long,
+        ): ByteArray =
+            ByteArray(STRING_OBJECT_SIZE) { index ->
+                val word = if (index < WORD_SIZE) lowWord else highWord
+                ((word shr ((index % WORD_SIZE.toInt()) * 8)) and 0xff).toByte()
+            }
     }
 
     init {
@@ -72,10 +149,10 @@ class SmallStringLiteralAnalyzer : AbstractAnalyzer(
         setPrototype()
     }
 
+    // The inline 16-byte _StringObject only exists on 64-bit targets.
     override fun canAnalyze(program: Program): Boolean =
-        program.language.processor == ghidra.program.model.lang.Processor.findOrPossiblyCreateProcessor(
-            "AARCH64"
-        )
+        program.defaultPointerSize == 8 &&
+            program.language.processor.toString() in SUPPORTED_PROCESSORS
 
     override fun added(
         program: Program,
@@ -83,295 +160,187 @@ class SmallStringLiteralAnalyzer : AbstractAnalyzer(
         monitor: TaskMonitor,
         log: MessageLog,
     ): Boolean {
-        val listing = program.listing
-        var count = 0
-        val processedAddresses = mutableSetOf<ghidra.program.model.address.Address>()
-
+        var resolved = 0
         try {
-            val instructions = listing.getInstructions(set, true)
-
-            while (instructions.hasNext()) {
-                if (monitor.isCancelled) throw CancelledException()
-
-                val inst = instructions.next() ?: continue
-
-                // Skip if this instruction was already processed as part of a previous sequence
-                if (inst.address in processedAddresses) continue
-
-                // Look for mov or movz instructions with immediate values
-                val isMov = inst.mnemonicString == "mov" || inst.mnemonicString == "movz"
-                if (!isMov) continue
-
-                val destReg = inst.getRegister(0) ?: continue
-                val scalar = inst.getScalar(1) ?: continue
-
-                val accumulatedBytes = mutableListOf<Byte>()
-
-                val firstBytes = scalar.unsignedValue.toBytes()
-                accumulatedBytes.addAll(firstBytes.toList())
-
-                val lastFirstRegInst = collectMovksForRegister(
-                    listing,
-                    inst,
-                    destReg.name,
-                    0, // byte offset 0 for first register
-                    accumulatedBytes,
-                    processedAddresses
-                )
-
-                // Try to collect second register
-                val discriminatorInst = collectSecondRegisterIfPresent(
-                    listing,
-                    lastFirstRegInst,
-                    accumulatedBytes,
-                    processedAddresses
-                ) ?: lastFirstRegInst
-                val stringBytes = accumulatedBytes.toByteArray()
-
-                // Verify the accumulated bytes contain a valid discriminator (bit 61 set = isSmall)
-                // The discriminator is encoded in byte 15 (the most significant byte)
-                // Bit pattern (from MSB): isImmortal(1) | isASCII(1) | isSmall(1) | isForeign(1) | ...
-                // For small string literals, we need isSmall bit (bit 5 of byte 15) to be set
-                if (stringBytes.size < 16) {
-                    continue
-                }
-
-                val discriminatorByte = stringBytes[15].toInt() and 0xff
-                val hasSmallBit = (discriminatorByte and 0x20) != 0  // Check bit 5 (isSmall)
-
-                if (!hasSmallBit) {
-                    continue
-                }
-
-                // Decode the string content
-                val stringValue = decodeSmallString(stringBytes)
-                if (stringValue == null) {
-                    continue
-                }
-
-                // Mark all instructions in this sequence as processed
-                processedAddresses.add(inst.address)
-                var temp = inst
-                while (true) {
-                    val next = listing.getInstructionAfter(temp.address) ?: break
-                    if (next.address > discriminatorInst.address) break
-                    processedAddresses.add(next.address)
-                    temp = next
-                }
-
-                // Add a reference and comment at the discriminator instruction
-                if (stringValue.isNotEmpty()) {
-                    runCatching {
-                        val codeUnit = listing.getCodeUnitAt(discriminatorInst.address) ?: return@runCatching
-                        val comment = "Small string: \"$stringValue\""
-                        val existing = codeUnit.getComment(CommentType.EOL)
-                        if (existing == null || !existing.contains(comment)) {
-                            val mergedComment = if (existing.isNullOrBlank()) {
-                                comment
-                            } else {
-                                "$existing | $comment"
-                            }
-                            codeUnit.setComment(CommentType.EOL, mergedComment)
-                        }
-                    }.onFailure {
-                        Msg.warn(this, "Could not set comment at ${discriminatorInst.address}: ${it.message}")
-                    }
-
-                    count++
-                    monitor.message = "Small strings resolved: $count"
-                }
+            for (function in program.functionManager.getFunctions(set, true)) {
+                monitor.checkCancelled()
+                resolved += analyzeFunction(program, function, monitor)
+                monitor.message = "Small strings resolved: $resolved"
             }
         } catch (_: CancelledException) {
             return false
         }
-
-        monitor.message = "Small strings resolved: $count"
         return true
     }
 
-    /**
-     * Collects movk instructions for a given register starting from the specified instruction.
-     *
-     * Modifies accumulatedBytes in-place by inserting the decoded bytes from each movk instruction
-     * at the appropriate position based on the shift amount and byteOffset.
-     *
-     * Returns the last movk instruction processed, or the input instruction if no movks found.
-     */
-    private fun collectMovksForRegister(
-        listing: Listing,
-        startInst: Instruction,
-        regName: String,
-        byteOffset: Int,
-        accumulatedBytes: MutableList<Byte>,
-        processedAddresses: MutableSet<ghidra.program.model.address.Address>
-    ): Instruction {
-        var current = startInst
-        var movkCount = 0
+    private fun analyzeFunction(
+        program: Program,
+        function: Function,
+        monitor: TaskMonitor,
+    ): Int {
+        // recordStartEndState must be on: without it getRegisterValue ignores the address it is
+        // given and answers with whatever the propagation happened to end on.
+        val propagator = SymbolicPropogator(program, true)
+        // saveContext = true, so the per-instruction register values stay queryable afterwards.
+        propagator.flowConstants(
+            function.entryPoint,
+            function.body,
+            ContextEvaluatorAdapter(),
+            true,
+            monitor,
+        )
 
-        while (movkCount < MAX_MOVK_SEQUENCE) {
-            val nextMovk = listing.getInstructionAfter(current.address) ?: break
-            if (nextMovk.mnemonicString != "movk") break
-            if (nextMovk.getRegister(0)?.name != regName) break
+        val abiPairs = abiRegisterPairs(program)
+        val storedWords = mutableMapOf<Slot, Long>()
+        val freshRegisters = mutableSetOf<String>()
+        var resolved = 0
 
-            val immValue = nextMovk.getScalar(1)?.unsignedValue ?: break
+        for (instruction in program.listing.getInstructions(function.body, true)) {
+            monitor.checkCancelled()
 
-            // Ghidra returns the value already shifted, so convert directly to bytes
-            // The bytes will be in the correct positions due to the shift being embedded
-            val valueBytes = immValue.toBytes()
+            // A String written to memory: the content word lands 8 bytes below the discriminator.
+            for ((slot, word) in wordsStoredBy(instruction, propagator)) {
+                val contentWord = storedWords[slot.previous()]
+                if (contentWord != null && comment(program, instruction.address, contentWord, word)) {
+                    resolved++
+                }
+                storedWords[slot] = word
+            }
 
-            // Merge these 8 bytes into accumulatedBytes starting at byteOffset
-            // Use OR to combine bytes instead of overwriting, since different movks
-            // have different shift positions (embedded in immValue by Ghidra)
-            for ((idx, b) in valueBytes.withIndex()) {
-                val byteIdx = byteOffset + idx
-                if (byteIdx < accumulatedBytes.size) {
-                    val combined = (accumulatedBytes[byteIdx].toInt() and 0xff) or (b.toInt() and 0xff)
-                    accumulatedBytes[byteIdx] = combined.toByte()
-                } else {
-                    accumulatedBytes.add(b)
+            // A String handed to a call or returned: the two words sit in adjacent ABI registers.
+            // Both halves must have been set since the previous call, or this is just whatever an
+            // earlier String left behind — argument registers stay constant across unrelated calls,
+            // and reporting those leftovers buries the real hits.
+            if (instruction.flowType.isCall || instruction.flowType.isTerminal) {
+                for ((contentRegister, discriminatorRegister) in abiPairs) {
+                    if (contentRegister.name !in freshRegisters) continue
+                    if (discriminatorRegister.name !in freshRegisters) continue
+                    val contentWord = registerValue(propagator, instruction, contentRegister) ?: continue
+                    val discriminator = registerValue(propagator, instruction, discriminatorRegister) ?: continue
+                    if (comment(program, instruction.address, contentWord, discriminator)) resolved++
                 }
             }
 
-            current = nextMovk
-            movkCount++
-            processedAddresses.add(nextMovk.address)
-        }
-
-        return current
-    }
-
-    /**
-     * Attempts to collect a second register with more string data (for 9-16 byte strings).
-     *
-     * Returns the last instruction of the second register sequence (either last movk or initial mov),
-     * or the discriminator instruction if found directly after the first register.
-     *
-     * For dual-register strings, collects the second register's bytes into accumulatedBytes.
-     * Even if the second register contains a discriminator, its bytes are added to accumulatedBytes
-     * since they may contain string data.
-     */
-    private fun collectSecondRegisterIfPresent(
-        listing: Listing,
-        lastFirstRegInst: Instruction,
-        accumulatedBytes: MutableList<Byte>,
-        processedAddresses: MutableSet<ghidra.program.model.address.Address>
-    ): Instruction? {
-        // Next instruction should be either second register mov, discriminator, or something else
-        val next = listing.getInstructionAfter(lastFirstRegInst.address) ?: return null
-
-        // Stop at branch instructions
-        val mnemonic = next.mnemonicString
-        if (mnemonic == "bl" || mnemonic == "blr" || mnemonic == "b" ||
-            mnemonic == "br" || mnemonic.startsWith("b.")
-        ) {
-            return null
-        }
-
-        val reg = next.getRegister(0) ?: return null
-        val scalar = next.getScalar(1) ?: return null
-        val value = scalar.unsignedValue
-
-        // Check if it's mov/movz
-        if (mnemonic != "mov" && mnemonic != "movz") {
-            return null
-        }
-
-        // Add the second register's initial value at byte offset 8
-        // This applies to both low values (string data) and high values (discriminator with possible string data)
-        val secondRegBytes = value.toBytes()
-
-        for ((idx, b) in secondRegBytes.withIndex()) {
-            val byteIdx = 8 + idx
-            if (byteIdx < accumulatedBytes.size) {
-                val combined = (accumulatedBytes[byteIdx].toInt() and 0xff) or (b.toInt() and 0xff)
-                accumulatedBytes[byteIdx] = combined.toByte()
+            if (instruction.flowType.isCall) {
+                freshRegisters.clear()
             } else {
-                accumulatedBytes.add(b)
+                // Track by base register: `mov w1, #0x20` is what makes x1 fresh.
+                instruction.resultObjects
+                    .filterIsInstance<Register>()
+                    .forEach { freshRegisters.add(it.baseRegister.name) }
             }
         }
-
-        // Low value - it's a second register mov with string data, collect its movks
-        val secondRegName = reg.name
-
-        // Collect movks on the second register
-        return collectMovksForRegister(
-            listing,
-            next,
-            secondRegName,
-            8, // byte offset for second register
-            accumulatedBytes,
-            processedAddresses
-        )
+        return resolved
     }
 
-
-
     /**
-     * Decodes a small string from accumulated bytes.
-     * The format is:
-     * - Bytes 0-14: string content (up to 15 chars)
-     * - Byte 15: high nibble is discriminator, low nibble may be padding or last char
+     * The 64-bit words this instruction writes to memory, keyed by the slot they are written to.
      *
-     * Returns the decoded string, or null if it doesn't look like valid ASCII.
+     * A slot is "base register plus displacement" rather than a resolved address, because the base
+     * is typically a fresh heap pointer whose value is unknown. That is enough to tell whether two
+     * writes are 8 bytes apart, which is all the pairing needs. `stp` writes two words in one
+     * instruction, so the source operands are numbered off the displacement in order.
      */
-    private fun decodeSmallString(bytes: ByteArray): String? {
-        if (bytes.isEmpty()) return null
+    private fun wordsStoredBy(
+        instruction: Instruction,
+        propagator: SymbolicPropogator,
+    ): List<Pair<Slot, Long>> {
+        // Operand ref types do not mark the destination of a store (arm64 `stp` reports DATA for
+        // its memory operand), so the pcode is what says whether this instruction writes memory.
+        if (instruction.pcode.none { it.opcode == PcodeOp.STORE }) return emptyList()
 
-        // Find the actual string length by looking for printable ASCII
-        var endIdx = bytes.size - 1
-        while (endIdx > 0 && bytes[endIdx] == 0.toByte()) {
-            endIdx--
+        val destination =
+            (0 until instruction.numOperands)
+                .firstOrNull { OperandType.isDynamic(instruction.getOperandType(it)) }
+                ?: return emptyList()
+
+        val operandObjects = instruction.getOpObjects(destination)
+        val base = operandObjects.filterIsInstance<Register>().firstOrNull() ?: return emptyList()
+        val displacement = operandObjects.filterIsInstance<Scalar>().firstOrNull()?.value ?: 0L
+
+        val sources = (0 until instruction.numOperands).filter { it != destination }
+        return sources.mapIndexedNotNull { position, operand ->
+            val word = operandValue(instruction, operand, propagator) ?: return@mapIndexedNotNull null
+            Slot(base.name, displacement + position * WORD_SIZE) to word
         }
+    }
 
-        // Extract printable characters
-        val stringChars = mutableListOf<Char>()
-        for (i in 0..endIdx) {
-            val b = bytes[i].toInt() and 0xff
+    /** The constant value of an operand, whether it is an immediate or a register. */
+    private fun operandValue(
+        instruction: Instruction,
+        operand: Int,
+        propagator: SymbolicPropogator,
+    ): Long? {
+        instruction.getScalar(operand)?.let { return it.value }
+        val register = instruction.getRegister(operand) ?: return null
+        return registerValue(propagator, instruction, register)
+    }
 
-            if (b == 0) {
-                break  // null terminator
-            } else if (b in PRINTABLE_ASCII_MIN..PRINTABLE_ASCII_MAX) {
-                stringChars.add(b.toChar())
-            } else if (b in 0x09..0x0d) {
-                // Allow tabs, newlines, etc.
-                stringChars.add(b.toChar())
+    private fun registerValue(
+        propagator: SymbolicPropogator,
+        instruction: Instruction,
+        register: Register,
+    ): Long? {
+        if (register.bitLength > 64) return null
+        val value = propagator.getRegisterValue(instruction.address, register) ?: return null
+        // A value expressed relative to another register is not a constant we can decode.
+        return if (value.isRegisterRelativeValue) null else value.value
+    }
+
+    private fun abiRegisterPairs(program: Program): List<Pair<Register, Register>> {
+        val names =
+            if (program.language.processor.toString() == "AARCH64") {
+                ARM64_ABI_REGISTERS.zipWithNext()
+            } else {
+                X86_ABI_REGISTERS.zipWithNext() + X86_RETURN_REGISTERS
+            }
+        return names.mapNotNull { (low, high) ->
+            val lowRegister = program.getRegister(low) ?: return@mapNotNull null
+            val highRegister = program.getRegister(high) ?: return@mapNotNull null
+            lowRegister to highRegister
+        }
+    }
+
+    /** Annotates [address] with the decoded string. Returns false if there is nothing to say. */
+    private fun comment(
+        program: Program,
+        address: Address,
+        contentWord: Long,
+        discriminatorWord: Long,
+    ): Boolean {
+        val value = decodeSmallString(contentWord, discriminatorWord) ?: return false
+        val comment = "Small string: \"${value.escaped()}\""
+        return runCatching {
+            val codeUnit = program.listing.getCodeUnitAt(address) ?: return@runCatching false
+            val existing = codeUnit.getComment(CommentType.EOL)
+            if (existing != null && existing.contains(comment)) return@runCatching false
+            codeUnit.setComment(
+                CommentType.EOL,
+                if (existing.isNullOrBlank()) comment else "$existing | $comment",
+            )
+            true
+        }.onFailure {
+            Msg.warn(this, "Could not comment small string at $address: ${it.message}")
+        }.getOrDefault(false)
+    }
+
+    /** Keeps control characters from breaking the single-line comment they end up in. */
+    private fun String.escaped(): String =
+        buildString {
+            for (character in this@escaped) {
+                when (character) {
+                    '\n' -> append("\\n")
+                    '\r' -> append("\\r")
+                    '\t' -> append("\\t")
+                    '"' -> append("\\\"")
+                    '\\' -> append("\\\\")
+                    else -> append(character)
+                }
             }
         }
 
-        val result = if (stringChars.isNotEmpty()) stringChars.joinToString("") else null
-
-        return result
-    }
-
-    /**
-     * Converts a Long to a byte array (little-endian).
-     */
-    private fun Long.toBytes(): ByteArray {
-        return byteArrayOf(
-            (this and 0xffL).toByte(),
-            ((this shr 8) and 0xffL).toByte(),
-            ((this shr 16) and 0xffL).toByte(),
-            ((this shr 24) and 0xffL).toByte(),
-            ((this shr 32) and 0xffL).toByte(),
-            ((this shr 40) and 0xffL).toByte(),
-            ((this shr 48) and 0xffL).toByte(),
-            ((this shr 56) and 0xffL).toByte(),
-        )
+    /** A memory location as "base register + displacement"; see [wordsStoredBy]. */
+    private data class Slot(val base: String, val displacement: Long) {
+        fun previous() = copy(displacement = displacement - WORD_SIZE)
     }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

@@ -158,7 +158,7 @@ Tests that depend on external binaries use JUnit's `assumeTrue` — if the requi
     -  [x] Automatic property tagging and annotation
     -  [x] NSBlock Analysis
 - Swift
-    -  [x] Small string analysis
+    -  [x] Small string analysis (arm64 and x86_64)
     -  [x] String literal XREF analysis
 - Universal
     -  [ ] Improved DYLD shared cache loader

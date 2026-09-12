@@ -58,6 +58,27 @@ objdump -d test > test_disasm.txt
 100000690: d65f03c0    	ret
 ```
 
+### Assembly Output (x86-64/Intel Mac)
+
+The same source compiled for Intel produces the same 16 bytes, but nothing about the instruction
+sequence is the same. x86-64 fills a whole word with one immediate, so there is no `movk` chain,
+and the two halves are stored separately rather than by a single paired store:
+
+```assembly
+1000008b7: 	movabsq	$0x5848556d30654946, %rax   ; "FIe0mUHX"
+1000008c1: 	movq	%rax, 0x20(%r15)
+1000008c5: 	movabsq	$-0x1800000000000000, %r12  ; discriminator, count = 8
+1000008cf: 	movq	%r12, 0x28(%r15)
+```
+
+Short strings skip the register entirely and go straight to memory as a store immediate:
+
+```assembly
+100000954: 	movq	$0x41, 0x20(%rax)           ; "A"
+10000095c: 	movabsq	$-0x1f00000000000000, %rbx  ; discriminator, count = 1
+100000966: 	movq	%rbx, 0x28(%rax)
+```
+
 ## Decoding the Assembly
 
 These two ARM64 values encode the small string `"Hi"` in an extremely efficient way:
@@ -161,6 +182,60 @@ bit 62 (b62): isASCII      - All characters are ASCII
 bit 61 (b61): isSmall      - Is a small string
 bit 60 (b60): isForeign    - Cannot provide contiguous UTF-8 access
 ```
+
+## How the analyzer reads these
+
+### The first version matched instruction patterns, and had to be replaced
+
+`SmallStringLiteralAnalyzer` originally looked for exactly the shape the listings above show: an
+initial `mov`, up to three `movk` instructions on the same register, then a second `mov` holding
+the discriminator, all adjacent. That reads naturally off a disassembly of `"Hello, World!!!"`,
+and it does find that case.
+
+It misses most real ones. The discriminator is the same constant for every string in a program,
+so both targets hoist it into a callee-saved register and reuse it. From the second string
+onward, half of the value is simply not in the block:
+
+```assembly
+100000944: 	mov	w8, #0x41
+100000948: 	mov	x23, #-0x1f00000000000000
+10000094c: 	stp	x8, x23, [x0, #0x20]        ; "A"
+...
+100000990: 	mov	w8, #0x47
+100000994: 	stp	x8, x23, [x0, #0x20]        ; "G" - x23 reused, never reloaded
+```
+
+x86-64 breaks the same assumption a second way: the two halves reach memory through separate
+store instructions, and a short string never passes through a register at all
+(`movq $0x41, 0x20(%rax)`). Neither target offers a reliable window of adjacent instructions.
+
+The old decoder was too permissive to compensate. It scanned for printable bytes and silently
+dropped anything else, ignoring the count and the padding entirely, so it would accept byte pairs
+that were not strings while still missing the strings that were there.
+
+What makes this worth recording is the failure mode: a pattern matcher does not fail loudly on
+the strings it cannot see. It reports a smaller number, confidently.
+
+### What it does now
+
+The analyzer no longer matches instructions. It asks Ghidra's `SymbolicPropogator` - the same
+constant-propagation engine behind the built-in Constant Reference Analyzer - for the constant
+value of each register at each instruction, which answers the question the pattern matcher could
+not: what is in `x23` here, however far away it was set.
+
+Two words are then treated as one `_StringObject` wherever they end up adjacent:
+
+- **written 8 bytes apart in memory**, keyed by base register plus displacement rather than by a
+  resolved address, since the base is usually a fresh heap pointer of unknown value. This covers
+  arm64's single `stp` and x86-64's pair of separate stores identically.
+- **held in consecutive ABI registers** at a call or return, for strings that never reach memory,
+  such as a function returning one. Both halves must have been written since the previous call -
+  argument registers keep their values across unrelated calls, and reporting those leftovers
+  buries the real hits.
+
+Candidate pairs are cheap to produce and mostly junk, so `decodeSmallString` is what rejects them:
+it checks the discriminator bits, the count, the zero padding after the content, and every content
+byte, and returns nothing unless all of them agree.
 
 ## References
 
