@@ -31,6 +31,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Start virtual display
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb
+          Xvfb :99 -screen 0 1280x1024x24 > /dev/null 2>&1 &
+          echo "DISPLAY=:99" >> "$GITHUB_ENV"
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -44,6 +51,15 @@ jobs:
           auth_token: ${{ secrets.GITHUB_TOKEN }}
           version: ${{ matrix.ghidra }}
 
+      - name: Build extension
+        run: ./gradlew buildExtension
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: GhidraApple-ghidra${{ matrix.ghidra }}
+          path: dist/*.zip
+
       - name: Run unit tests
         run: ./gradlew test
 
@@ -53,15 +69,6 @@ jobs:
         with:
           name: test-report-ghidra${{ matrix.ghidra }}
           path: build/reports/tests/test
-
-      - name: Build extension
-        run: ./gradlew buildExtension
-
-      - name: Upload build artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: GhidraApple-ghidra${{ matrix.ghidra }}
-          path: dist/*.zip
 
       - name: Attach to release
         if: github.event_name == 'release'
