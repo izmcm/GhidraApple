@@ -52,6 +52,20 @@ jobs:
             echo "Nothing to do: $latest is already in the list."
           fi
 
+      - name: Update readme
+        if: steps.update.outputs.changed == 'true'
+        env:
+          LATEST: ${{ steps.update.outputs.latest }}
+        run: |
+          # "**a**, **b** and **c**" / "a, b or c", from the versions file.
+          bold=$(jq -r 'map("**\(.)**") | (.[:-1] | join(", ")) + " and " + .[-1]' .github/ghidra-versions.json)
+          plain=$(jq -r '(.[:-1] | join(", ")) + " or " + .[-1]' .github/ghidra-versions.json)
+          sed -i -E \
+            -e "s/^Supported Ghidra versions: .*/Supported Ghidra versions: ${bold}./" \
+            -e "s/^\| Ghidra \| [^|]* \|/| Ghidra | ${plain} |/" \
+            -e "s/ghidra_[0-9.]+_PUBLIC/ghidra_${LATEST}_PUBLIC/g" \
+            readme.md
+
       - name: Open pull request
         if: steps.update.outputs.changed == 'true'
         uses: peter-evans/create-pull-request@v7
@@ -65,3 +79,5 @@ jobs:
 
             The list of supported versions has been trimmed to the 3 most recent.
             The CI will build against each; **review the result before merging**.
+            The readme's version references were updated too; if this Ghidra needs a new
+            Java or Gradle version, update the readme's requirements by hand.

@@ -2,8 +2,10 @@
 
 Ghidra extension for macOS/iOS binary analysis.
 
-Supported Ghidra versions: **12.2**, **12.1.4** and **12.1.3** (the list CI builds against lives in
-[`.github/ghidra-versions.json`](.github/ghidra-versions.json)).
+Supported Ghidra versions: **12.2**, **12.1.4** and **12.1.3**.
+
+CI builds against the versions in [`.github/ghidra-versions.json`](.github/ghidra-versions.json); the
+daily version-bump job updates that file and the version references in this readme.
 
 ---
 
