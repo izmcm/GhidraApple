@@ -181,10 +181,7 @@ class MarkNSConcreteStackBlock(
             program.dataTypeManager.apply {
                 // Yes, we do need to call [getDataType] and get another instance. Calling [remove] with
                 //  the existing instance does not work, unfortunately.
-                remove(
-                    getDataType(CategoryPath(BLOCK_CATEGORY_PATH_STRING), minimalBlockLayoutType.name),
-                    TaskMonitor.DUMMY,
-                )
+                remove(getDataType(CategoryPath(BLOCK_CATEGORY_PATH_STRING), minimalBlockLayoutType.name))
             }
         }
         // TODO: Maybe perform a second pass to get better typing for the imported variables.
@@ -300,10 +297,7 @@ class MarkBlockByRef(
             program.dataTypeManager.apply {
                 // Yes, we do need to call [getDataType] and get another instance. Calling [remove] with
                 //  the existing instance does not work, unfortunately.
-                remove(
-                    getDataType(CategoryPath(BLOCK_CATEGORY_PATH_STRING), minimalBlockByRefType.name),
-                    TaskMonitor.DUMMY,
-                )
+                remove(getDataType(CategoryPath(BLOCK_CATEGORY_PATH_STRING), minimalBlockByRefType.name))
             }
         }
         // TODO: Maybe perform a second pass to get better typing for the imported variables.
