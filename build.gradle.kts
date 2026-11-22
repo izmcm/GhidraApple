@@ -1,10 +1,12 @@
+import java.util.Properties
+
 // This cannot be used inside the `plugins` block, but can (and is) used elsewhere and
 //  should match the version used inside the `plugins` block.
-val kotlinVersion = "1.9.23"
+val kotlinVersion = "2.3.0"
 
 plugins {
-    kotlin("jvm") version "1.9.23"
-    id("org.jlleitschuh.gradle.ktlint") version "12.1.2"
+    kotlin("jvm") version "2.3.0"
+    id("org.jlleitschuh.gradle.ktlint") version "13.1.0"
     id("idea")
 }
 
@@ -55,8 +57,20 @@ dependencies {
     )
 }
 
+// Ghidra pins compileJava to its own Java version (21 for 12.1, 25 for 12.2+); Kotlin must match.
+val ghidraJavaVersion =
+    Properties()
+        .apply { File("$ghidraInstallDir/Ghidra/application.properties").inputStream().use { load(it) } }
+        .getProperty("application.java.compiler")
+        .toInt()
+
 kotlin {
-    jvmToolchain(21)
+    jvmToolchain(ghidraJavaVersion)
+}
+
+// Same engine the 12.x plugin used; newer engines add rules the codebase does not follow yet.
+ktlint {
+    version.set("1.0.1")
 }
 
 tasks.test {

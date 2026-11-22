@@ -272,7 +272,7 @@ class ObjcAllocationInitializationTest : AbstractGhidraHeadedIntegrationTest() {
             // This is intentionally created without a parameter, because the analyzer should handle
             // cases where the alloc function is not properly typed yet
         )
-        builder.createEmptyFunction("_testAllocationSiteHuman", "0x100008c34", 0x100008c6c - 0x100008c34, DataType.DEFAULT)
+        builder.createEmptyFunction("_testAllocationSiteHuman", "0x100008c34", (0x100008c6c - 0x100008c34).toInt(), DataType.DEFAULT)
         builder.createEmptyFunction("_objc_storeStrong", "0x100009518", 1, DataType.DEFAULT)
         builder.createLabel("0x100011778", "_OBJC_CLASS_\$_Human")
         builder.setBytes("0x100011578", "78 17 01 00 01 00 00 00")
