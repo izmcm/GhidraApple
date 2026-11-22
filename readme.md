@@ -2,7 +2,8 @@
 
 Ghidra extension for macOS/iOS binary analysis.
 
-Supported Ghidra versions: **12.1.3** and **12.1.2**.
+Supported Ghidra versions: **12.2**, **12.1.4** and **12.1.3** (the list CI builds against lives in
+[`.github/ghidra-versions.json`](.github/ghidra-versions.json)).
 
 ---
 
@@ -28,14 +29,14 @@ You need Xcode or the Command Line Tools (`xcode-select --install`). The Gradle 
 Ghidra, so there is nothing else to install:
 
 ```bash
-cd /path/to/ghidra_12.1.3_PUBLIC/support/gradle
+cd /path/to/ghidra_12.2_PUBLIC/support/gradle
 ./gradlew buildNatives
 ```
 
 Takes well under a minute. Verify — `mac_arm_64` on Apple Silicon, `mac_x86_64` on Intel:
 
 ```bash
-ls /path/to/ghidra_12.1.3_PUBLIC/Ghidra/Features/Decompiler/build/os/mac_arm_64/
+ls /path/to/ghidra_12.2_PUBLIC/Ghidra/Features/Decompiler/build/os/mac_arm_64/
 # should list: decompile  sleigh
 ```
 
@@ -48,7 +49,7 @@ ls /path/to/ghidra_12.1.3_PUBLIC/Ghidra/Features/Decompiler/build/os/mac_arm_64/
 If you just want to use the extension, **don't clone or build anything** — grab the ready-made `.zip` from the [Releases page](https://github.com/izmcm/GhidraApple/releases) and install it.
 
 1. Open the [latest release](https://github.com/izmcm/GhidraApple/releases/latest)
-2. Download the `.zip` matching your Ghidra version, e.g. `ghidra_12.1.3_PUBLIC_<date>_GhidraApple.zip`
+2. Download the `.zip` matching your Ghidra version, e.g. `ghidra_12.2_PUBLIC_<date>_GhidraApple.zip`
 3. Install it, either way:
 
 **Via Ghidra UI (recommended)**
@@ -61,8 +62,8 @@ If you just want to use the extension, **don't clone or build anything** — gra
 **By hand (unzip into the Ghidra folder)**
 
 ```bash
-unzip ghidra_12.1.3_PUBLIC_<date>_GhidraApple.zip \
-  -d /path/to/ghidra_12.1.3_PUBLIC/Ghidra/Extensions/
+unzip ghidra_12.2_PUBLIC_<date>_GhidraApple.zip \
+  -d /path/to/ghidra_12.2_PUBLIC/Ghidra/Extensions/
 ```
 
 This leaves a `GhidraApple/` folder inside `Ghidra/Extensions/`. Restart Ghidra, then enable it in `File > Configure`.
@@ -81,14 +82,14 @@ Only needed if you want to change the extension's code.
 
 | Tool | Version | Notes |
 |---|---|---|
-| Java (Temurin) | 21 | Required — other distributions may cause issues |
-| Gradle | 8.10 | Via Gradle Wrapper (`./gradlew`) |
-| Ghidra | 12.1.3 or 12.1.2 | |
+| Java (Temurin) | 25 (Ghidra 12.2) or 21 (Ghidra 12.1.x) | Must match what your Ghidra requires — other distributions may cause issues |
+| Gradle | 9.6.1 | Via Gradle Wrapper (`./gradlew`), downloaded automatically |
+| Ghidra | 12.2, 12.1.4 or 12.1.3 | |
 | IntelliJ IDEA | Any recent | Community Edition is sufficient |
 
 ---
 
-## 1. Java 21 Temurin via SDKMAN
+## 1. Java Temurin via SDKMAN
 
 Install [SDKMAN](https://sdkman.io) if you don't have it:
 
@@ -97,18 +98,20 @@ curl -s "https://get.sdkman.io" | bash
 source "$HOME/.sdkman/bin/sdkman-init.sh"
 ```
 
-Install and set Java 21 Temurin:
+Ghidra 12.2 requires Java 25; Ghidra 12.1.x requires Java 21. The build compiles with whichever
+version the Ghidra in `GHIDRA_INSTALL_DIR` asks for (its `application.java.compiler`), so install
+the matching Temurin. Pick the latest `25.x.x-tem` (or `21.x.x-tem`) from `sdk list java`:
 
 ```bash
-sdk install java 21.0.5-tem
-sdk use java 21.0.5-tem
+sdk install java 25.x.x-tem
+sdk use java 25.x.x-tem
 ```
 
 Verify:
 
 ```bash
 java -version
-# Expected: openjdk version "21.x.x" ... Temurin
+# Expected: openjdk version "25.x.x" ... Temurin
 ```
 
 ---
@@ -118,7 +121,7 @@ java -version
 Gradle needs to know where Ghidra is installed. Add to your `~/.zshrc` or `~/.bashrc`:
 
 ```bash
-export GHIDRA_INSTALL_DIR=/path/to/ghidra_12.1.3_PUBLIC
+export GHIDRA_INSTALL_DIR=/path/to/ghidra_12.2_PUBLIC
 ```
 
 Reload and confirm:
@@ -143,7 +146,7 @@ cd GhidraApple
 
 The output artifact will be at:
 ```
-dist/ghidra_12.1.3_PUBLIC_<date>_GhidraApple.zip
+dist/ghidra_12.2_PUBLIC_<date>_GhidraApple.zip
 ```
 
 ---
@@ -163,7 +166,7 @@ Open the project root in IntelliJ. The Ghidra classpath will be resolved automat
 ### Set the SDK in IntelliJ
 
 1. `File > Project Structure > SDK`
-2. Add the Java 21 Temurin installed in step 1
+2. Add the Java Temurin installed in step 1
 3. Confirm the `Project SDK` is pointing to it
 
 ---
@@ -217,7 +220,7 @@ Ghidra's native binaries were never built for macOS. See
 [macOS: build Ghidra's native binaries first](#macos-build-ghidras-native-binaries-first).
 
 **Java version error**
-Confirm with `java -version` that you're running Temurin 21. Other distributions (Oracle JDK, GraalVM) may cause incompatibilities.
+Confirm with `java -version` that you're running Temurin 25 (Ghidra 12.2) or 21 (Ghidra 12.1.x). Other distributions (Oracle JDK, GraalVM) may cause incompatibilities.
 
 **Build fails with Gradle error**
-Always use the wrapper `./gradlew` — never a globally installed Gradle — to ensure version 8.10 is used.
+Always use the wrapper `./gradlew` — never a globally installed Gradle — to ensure version 9.6.1 is used. Ghidra 12.2 refuses to build with Gradle older than 9.1.
