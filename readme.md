@@ -137,7 +137,7 @@ ls $GHIDRA_INSTALL_DIR/Ghidra  # should list Ghidra's internal folders
 ## 3. Clone and Build
 
 ```bash
-git clone https://github.com/ReverseApple/GhidraApple.git
+git clone https://github.com/izmcm/GhidraApple.git
 cd GhidraApple
 
 # Build the extension (generates a .zip in dist/)
